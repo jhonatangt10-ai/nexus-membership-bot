@@ -17,6 +17,16 @@ const {
   PORT
 } = process.env;
 
+// Debug imediato antes de qualquer throw
+console.log("=== ENV CHECK (STARTUP) ===");
+console.log("GENERIC_PRICE_ID:", GENERIC_PRICE_ID);
+console.log("PREMIUM_PRICE_ID:", PREMIUM_PRICE_ID);
+console.log("STRIPE_SECRET_KEY:", STRIPE_SECRET_KEY ? "LOADED" : "MISSING");
+console.log("STRIPE_WEBHOOK_SECRET:", STRIPE_WEBHOOK_SECRET ? "LOADED" : "MISSING");
+console.log("TELEGRAM_BOT_TOKEN:", TELEGRAM_BOT_TOKEN ? "LOADED" : "MISSING");
+console.log("GROUP_CHAT_ID:", GROUP_CHAT_ID);
+console.log("===========================");
+
 // 🔎 Debug para confirmar variáveis carregadas no Railway
 console.log("=== ENV CHECK ===");
 console.log("GENERIC_PRICE_ID:", GENERIC_PRICE_ID ? "OK" : "MISSING");
