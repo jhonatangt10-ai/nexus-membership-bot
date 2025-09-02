@@ -217,3 +217,16 @@ const listenPort = Number(PORT || 8080);
 app.listen(listenPort, () => {
   console.log(`server running on port ${listenPort}`);
 });
+
+// Webhook do Telegram
+app.post(`/bot${TELEGRAM_BOT_TOKEN}`, express.json(), (req, res) => {
+  console.log("Update recebido do Telegram:", req.body);
+
+  const message = req.body.message;
+
+  if (message && message.text === "/start") {
+    bot.sendMessage(message.chat.id, "🚀 Bem-vindo ao Nexus Community Bot!");
+  }
+
+  res.sendStatus(200);
+});
