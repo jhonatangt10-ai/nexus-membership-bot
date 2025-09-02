@@ -1,38 +1,40 @@
 // server.js — Nexus Membership Bot (Stripe + Telegram)
-// package.json precisa ter "type": "module" e deps: express, stripe, body-parser, node-fetch
+// Node 18+ / ESM
 
 import express from "express";
 import bodyParser from "body-parser";
 import Stripe from "stripe";
 import fetch from "node-fetch";
 
-// ===== ENV VARS (configure no Railway) =====
+// ====== ENV VARS (configure no Railway) ======
 const {
   STRIPE_SECRET_KEY,
   STRIPE_WEBHOOK_SECRET,
   TELEGRAM_BOT_TOKEN,
-  GROUP_CHAT_ID,      // ex: -1003037084693
-  PREMIUM_PRICE_ID,   // price_... (Premium)
-  GENERIC_PRICE_ID,   // price_... (Generic)
+  GROUP_CHAT_ID,       // ex: -1003037084693 (número negativo do supergroup)
+  PREMIUM_PRICE_ID,    // ex: price_...
+  GENERIC_PRICE_ID,    // ex: price_...
   PORT
 } = process.env;
 
-// Falta de variáveis — falha cedo e com mensagem clara nos logs
+// ====== Guardiões de configuração ======
 if (!STRIPE_SECRET_KEY) throw new Error("Missing STRIPE_SECRET_KEY");
 if (!STRIPE_WEBHOOK_SECRET) throw new Error("Missing STRIPE_WEBHOOK_SECRET");
 if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
 if (!GROUP_CHAT_ID) throw new Error("Missing GROUP_CHAT_ID");
-if (!PREMIUM_PRICE_ID) console.warn("WARN: PREMIUM_PRICE_ID not set");
-if (!GENERIC_PRICE_ID) console.warn("WARN: GENERIC_PRICE_ID not set");
+// Os PRICE_IDs podem ser opcionais dependendo do seu fluxo,
+// mas se você já os usa no front, mantemos o alerta se não vierem:
+if (!GENERIC_PRICE_ID) console.warn("WARN: GENERIC_PRICE_ID não configurado.");
+if (!PREMIUM_PRICE_ID) console.warn("WARN: PREMIUM_PRICE_ID não configurado.");
 
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 const app = express();
 
-// Healthcheck (Stripe usa para validar endpoint HTTPS às vezes)
-app.get("/", (_req, res) => res.send("OK"));
+// ====== Healthcheck ======
+app.get("/", (_req, res) => res.status(200).send("OK"));
 
-// =============== STRIPE WEBHOOK ===============
-// IMPORTANTE: para Stripe o body precisa ser RAW, então esta rota vem ANTES do express.json()
+// IMPORTANTE: o webhook do Stripe precisa vir **ANTES** do express.json()
+// e com body RAW para validar a assinatura.
 app.post(
   "/stripe-webhook",
   bodyParser.raw({ type: "application/json" }),
@@ -43,82 +45,61 @@ app.post(
       event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
     } catch (err) {
       console.error("⚠️  Webhook signature verification failed:", err.message);
-      return res.status(400).send(`Webhook error: ${err.message}`);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
     try {
-      // Logs úteis para filtrar no Railway
-      console.log("@received:", event.type);
+      // Trate apenas os eventos que você selecionou no Stripe Workbench
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object;
+          // Pegamos o telegram_id salvo nos metadata
+          const telegramId =
+            session.metadata?.telegram_id ||
+            session.subscription_metadata?.telegram_id ||
+            null;
 
-      if (event.type === "checkout.session.completed") {
-        const session = event.data.object;
+          // Label/nível do plano (opcional)
+          const tierLabel =
+            session.metadata?.tier ||
+            (session.mode === "subscription" ? "Premium" : "Generic");
 
-        // 1) Tenta pegar telegram_id dos metadata direto da session (checkout)
-        let telegramId = session?.metadata?.telegram_id;
+          if (!telegramId) {
+            console.warn("No telegram_id in session metadata.");
+            break;
+          }
 
-        // 2) Se veio de assinatura (subscription) com metadata, tenta lá também
-        if (!telegramId && session?.subscription) {
-          const sub = await stripe.subscriptions.retrieve(session.subscription);
-          telegramId = sub?.metadata?.telegram_id;
+          // Cria link de convite de uso único (30 min)
+          const invite = await createInviteLink();
+          if (invite) {
+            await sendTelegramMessage(telegramId, `✅ *${tierLabel}* ativado.\nEntre no grupo: ${invite}`, "Markdown");
+          }
+          break;
         }
 
-        if (!telegramId) {
-          console.warn("No telegram_id in checkout.session.completed");
-        } else {
-          // Decide o “tier” pelo price comprado
-          let tierLabel = "Generic";
-          const priceId = session?.line_items?.data?.[0]?.price?.id || session?.metadata?.price_id;
-          if (priceId === PREMIUM_PRICE_ID) tierLabel = "Premium";
-
-          await sendInvite(String(telegramId), tierLabel);
+        case "customer.created":
+        case "customer.updated":
+        case "customer.deleted": {
+          // Eventos informativos (opcional log)
+          console.log("Stripe event:", event.type);
+          break;
         }
+
+        default:
+          console.log("Unhandled event type:", event.type);
       }
-
-      // (Opcional) Outros eventos só para você ver que está chegando
-      if (event.type === "customer.created") console.log("customer.created OK");
-      if (event.type === "customer.deleted") console.log("customer.deleted OK");
-      if (event.type === "customer.updated") console.log("customer.updated OK");
-
-      res.sendStatus(200);
+      res.json({ received: true });
     } catch (err) {
-      console.error("Stripe handler error:", err);
-      res.status(500).send("Handler error");
+      console.error("Webhook handler error:", err);
+      res.status(500).send("Internal webhook error");
     }
   }
 );
 
-// Agora liberamos JSON padrão para as demais rotas
+// Agora podemos habilitar JSON para o resto das rotas
 app.use(express.json());
 
-// =============== TELEGRAM WEBHOOK ===============
-// O Telegram vai postar updates exatamente nesse path: /bot<token>
-app.post(`/bot${TELEGRAM_BOT_TOKEN}`, async (req, res) => {
-  try {
-    console.log("@tg_update:", JSON.stringify(req.body));
-
-    const msg = req.body.message;
-    if (msg && msg.text) {
-      const chatId = msg.chat.id;
-      const text = (msg.text || "").trim();
-
-      if (text === "/start") {
-        await sendMessage(chatId,
-          "🚀 Bem-vindo ao *Nexus Community Bot*!\n\n" +
-          "Use o botão de checkout para assinar e receber seu convite automático."
-        );
-      }
-    }
-
-    // SEMPRE 200 para o Telegram não reenviar
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("telegram webhook error:", err);
-    // Mesmo com erro, devolve 200 para não ficar reentregando indefinidamente
-    res.sendStatus(200);
-  }
-});
-
-// Opcional: endpoint utilitário para criar uma sessão de checkout via fetch do navegador
+// ====== Criar sessão de checkout ======
 app.post("/create-checkout-session", async (req, res) => {
   try {
     const { priceId, telegramId } = req.body;
@@ -129,13 +110,10 @@ app.post("/create-checkout-session", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
-      // Essas URLs são meramente de retorno visual; o que vale é o webhook
+      // Salve o telegramId nos metadata para resgatar no webhook:
+      metadata: { telegram_id: String(telegramId) },
       success_url: "https://t.me/NexusCommunityBRBot?start=ok",
-      cancel_url: "https://t.me/NexusCommunityBRBot?start=cancel",
-      // Gravamos o telegram_id para resgatar no webhook
-      metadata: { telegram_id: String(telegramId), price_id: priceId },
-      // Garantia extra para assinatura
-      subscription_data: { metadata: { telegram_id: String(telegramId) } }
+      cancel_url: "https://t.me/NexusCommunityBRBot?start=cancel"
     });
 
     res.json({ url: session.url });
@@ -145,48 +123,93 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-// =============== Funções auxiliares (Telegram) ===============
-async function sendMessage(chatId, text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown"
-    }),
-  });
-}
+// ====== Webhook do Telegram (recebe updates) ======
+app.post("/telegram-webhook", async (req, res) => {
+  try {
+    const update = req.body;
 
-async function sendInvite(telegramId, tierLabel = "Generic") {
-  // Cria link de convite temporário para o GRUPO alvo
-  const inviteRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/createChatInviteLink`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: GROUP_CHAT_ID,
-      member_limit: 1,
-      expire_date: Math.floor(Date.now() / 1000) + 1800 // 30 min
-    }),
-  }).then(r => r.json());
+    if (update?.message) {
+      const chatId = update.message.chat.id;
+      const text = update.message.text || "";
 
-  const inviteLink = inviteRes?.result?.invite_link;
-  if (!inviteLink) {
-    console.error("Failed to create invite link:", inviteRes);
-    return;
+      if (text.startsWith("/start")) {
+        const me = await getMe();
+        const name = me?.result?.first_name || "bot";
+        await sendTelegramMessage(
+          chatId,
+          `Olá! Eu sou o *${name}*.\n\nPara assinar, escolha um plano e eu te envio o link do grupo depois do pagamento. Se já pagou, apenas aguarde: eu verifico no Stripe e libero seu acesso.`,
+          "Markdown"
+        );
+      } else {
+        await sendTelegramMessage(chatId, "🤖 Comando não reconhecido.");
+      }
+    }
+
+    // sempre 200 pro Telegram
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("telegram-webhook error:", err);
+    res.json({ ok: true });
   }
+});
 
-  // Envia o convite por DM para o comprador
-  await sendMessage(
-    telegramId,
-    `✅ *${tierLabel}* ativado!\n\n👉 Entre no grupo: ${inviteLink}\n\n` +
-    `_Lembrete: memberships digitais não garantem emprego._`
-  );
+// ====== Diagnóstico: quem é o bot? ======
+app.get("/whoami", async (_req, res) => {
+  try {
+    const me = await getMe();
+    res.json(me);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ====== Helpers de Telegram ======
+const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+
+async function getMe() {
+  const r = await fetch(`${TG_API}/getMe`);
+  return r.json();
 }
 
-// =============== Start ===============
-const listenPort = PORT || 8080;
-app.listen(listenPort, () => {
-  console.log(`server running on port ${listenPort}`);
+async function sendTelegramMessage(chatId, text, parseMode = undefined) {
+  const body = { chat_id: chatId, text };
+  if (parseMode) body.parse_mode = parseMode;
+
+  const r = await fetch(`${TG_API}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const json = await r.json();
+  if (!json.ok) {
+    console.error("Error sending telegram message:", json);
+  }
+  return json;
+}
+
+async function createInviteLink() {
+  // Link único, 1 uso, expira em 30min
+  const body = {
+    chat_id: GROUP_CHAT_ID,
+    member_limit: 1,
+    expire_date: Math.floor(Date.now() / 1000) + 1800
+  };
+
+  const r = await fetch(`${TG_API}/createChatInviteLink`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const json = await r.json();
+  if (!json.ok) {
+    console.error("createChatInviteLink error:", json);
+    return null;
+  }
+  return json.result?.invite_link || null;
+}
+
+// ====== Start ======
+const port = Number(PORT || 8080);
+app.listen(port, () => {
+  console.log(`server running on port ${port}`);
 });
