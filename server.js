@@ -6,22 +6,29 @@ import bodyParser from "body-parser";
 import Stripe from "stripe";
 import fetch from "node-fetch";
 
-// ====== ENV VARS (configure no Railway) ======
+// ===== ENV VARS (configure no Railway) =====
 const {
   STRIPE_SECRET_KEY,
   STRIPE_WEBHOOK_SECRET,
   TELEGRAM_BOT_TOKEN,
-  GROUP_CHAT_ID,          // ex: -1003037084693
-  PREMIUM_PRICE_ID,       // price_... (Premium)
-  GENERIC_PRICE_ID,       // price_... (Generic)
+  GROUP_CHAT_ID,
+  PREMIUM_PRICE_ID,
+  GENERIC_PRICE_ID,
   PORT
 } = process.env;
 
-if (!STRIPE_SECRET_KEY) throw new Error("Missing STRIPE_SECRET_KEY");
-if (!STRIPE_WEBHOOK_SECRET) throw new Error("Missing STRIPE_WEBHOOK_SECRET");
-if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
-if (!GROUP_CHAT_ID) throw new Error("Missing GROUP_CHAT_ID");
+// 🔎 Debug para confirmar variáveis carregadas no Railway
+console.log("=== ENV CHECK ===");
+console.log("GENERIC_PRICE_ID:", GENERIC_PRICE_ID ? "OK" : "MISSING");
+console.log("PREMIUM_PRICE_ID:", PREMIUM_PRICE_ID ? "OK" : "MISSING");
+console.log("STRIPE_SECRET_KEY:", STRIPE_SECRET_KEY ? "OK" : "MISSING");
+console.log("STRIPE_WEBHOOK_SECRET:", STRIPE_WEBHOOK_SECRET ? "OK" : "MISSING");
+console.log("TELEGRAM_BOT_TOKEN:", TELEGRAM_BOT_TOKEN ? "OK" : "MISSING");
+console.log("GROUP_CHAT_ID:", GROUP_CHAT_ID ? "OK" : "MISSING");
+console.log("=================");
 
+// Proteção extra
+if (!STRIPE_SECRET_KEY) throw new Error("❌ Missing STRIPE_SECRET_KEY");
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 const app = express();
 
